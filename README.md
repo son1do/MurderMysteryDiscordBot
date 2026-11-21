@@ -55,13 +55,30 @@
 
 ```text
 MurderMysteryDiscordBot/
-├── index.js              # Bot本体プログラム
+├── index.js              # エントリポイント（起動・コマンド自動読込・振り分け）
+├── lib/                  # 共通モジュール
+│   ├── state.js          # コマンド間で共有する状態管理
+│   ├── utils.js          # 時間変換・シャッフル・プログレスバー等の共通関数
+│   └── voice.js          # VC接続・チャイム再生・全員集合ヘルパー
+├── commands/             # コマンド別モジュール（自動読み込み）
+│   ├── timer.js          # /timer
+│   ├── dice.js           # /dice
+│   ├── pl.js             # /pl
+│   ├── vote.js           # /vote
+│   ├── vc.js             # /vc (split / gather / mute / unmute)
+│   ├── ready.js          # /ready
+│   ├── secret.js         # /secret
+│   ├── turn.js           # /turn
+│   ├── char.js           # /char
+│   ├── nick.js           # /nick
+│   ├── scenario.js       # /scenario
+│   └── help.js           # /help
 ├── generate-sounds.js    # 効果音WAV生成スクリプト
 ├── package.json          # プロジェクト設定・依存関係
 ├── .env.example          # 環境変数のサンプル
 ├── .env                  # トークン設定ファイル（作成が必要）
 └── sounds/               # チャイム音（WAV）
-    ├── notice.wav        # 残り5分・1分用（ピンポーン）
+    ├── notice.wav        # 残り5分・1分・完了用（ピンポーン）
     └── finish.wav        # 終了用（ピピピッ）
 ```
 

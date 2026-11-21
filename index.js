@@ -105,6 +105,72 @@ const activeTurns = new Map();
 // サーバーごとのキャラクター配役セッション管理: Map<guildId, CharSession>
 const charSessions = new Map();
 
+// 直近の /char 配役確定結果: Map<guildId, { userId: string, charName: string }[]>
+const lastCharResults = new Map();
+
+// 変更前の元ニックネーム保存: Map<guildId, Map<userId, { originalNick: string | null, originalDisplayName: string }>>
+const savedNicknames = new Map();
+
+function getSavedNickMap(guildId) {
+  if (!savedNicknames.has(guildId)) savedNicknames.set(guildId, new Map());
+  return savedNicknames.get(guildId);
+}
+
+/**
+ * ニックネーム文字列をフォーマット（Discord上限32文字に収める）
+ */
+function formatCharacterNick(charName, baseName, format = 'both') {
+  if (format === 'char_only') {
+    return charName.slice(0, 32);
+  }
+  const suffix = `（${baseName}）`;
+  const combined = `${charName}${suffix}`;
+  if (combined.length <= 32) return combined;
+  const maxCharLen = Math.max(1, 32 - suffix.length);
+  return `${charName.slice(0, maxCharLen)}${suffix}`.slice(0, 32);
+}
+
+/**
+ * 複数メンバーのニックネームをキャラ名へ一括変更する共通関数
+ */
+async function applyCharacterNicknames({ guild, assignments, format = 'both', requestedByTag }) {
+  const savedMap = getSavedNickMap(guild.id);
+  const succeeded = [];
+  const failed = [];
+
+  await Promise.allSettled(
+    assignments.map(async ({ userId, charName }) => {
+      const member = await guild.members.fetch(userId).catch(() => null);
+      if (!member) {
+        failed.push({ name: `<@${userId}>`, reason: 'メンバーが見つかりません' });
+        return;
+      }
+
+      // 初回変更時のみ元のニックネームを保存（2回目以降の上書きを防止）
+      if (!savedMap.has(userId)) {
+        savedMap.set(userId, {
+          originalNick: member.nickname,
+          originalDisplayName: member.displayName,
+        });
+      }
+      const baseName = savedMap.get(userId).originalDisplayName;
+      const newNick = formatCharacterNick(charName, baseName, format);
+
+      try {
+        await member.setNickname(newNick, `マダミス配役ニックネーム変更 (by ${requestedByTag})`);
+        succeeded.push({ baseName, newNick });
+      } catch (err) {
+        const reason = member.id === guild.ownerId
+          ? 'サーバー所有者のためBotから変更不可'
+          : 'Botより上位のロールを持つため変更不可';
+        failed.push({ name: baseName, newNick, reason });
+      }
+    })
+  );
+
+  return { succeeded, failed };
+}
+
 /**
  * キャラクター配役・段階的抽選セッションクラス
  * - 希望が1人のキャラはその場で確定
@@ -1526,7 +1592,8 @@ const commands = [
           { name: '✅ 読み込み完了チェック (/ready)', value: 'ready' },
           { name: '✉️ 秘密メッセージ (/secret)', value: 'secret' },
           { name: '🎤 リレータイマー (/turn)', value: 'turn' },
-          { name: '🎭 キャラ配役・抽選 (/char)', value: 'char' }
+          { name: '🎭 キャラ配役・抽選 (/char)', value: 'char' },
+          { name: '🏷️ キャラ名ニックネーム (/nick)', value: 'nick' }
         )
     )
     .addBooleanOption(opt =>
@@ -1651,6 +1718,51 @@ const commands = [
     .addSubcommand(sub =>
       sub.setName('cancel').setDescription('進行中の配役決めを中止します（作成者のみ）')
     ),
+  new SlashCommandBuilder()
+    .setName('nick')
+    .setDescription('キャラクター名へニックネームを一括変更＆終了後に元の名前へ復元します')
+    .addSubcommand(sub =>
+      sub
+        .setName('from-char')
+        .setDescription('直近の /char 配役確定結果をもとに全員のニックネームを一括変更します')
+        .addStringOption(opt =>
+          opt
+            .setName('format')
+            .setDescription('表示形式（デフォルト: キャラ名（元名））')
+            .setRequired(false)
+            .addChoices(
+              { name: 'キャラ名（元の名前） 例: 探偵（田中）', value: 'both' },
+              { name: 'キャラ名のみ 例: 探偵', value: 'char_only' }
+            )
+        )
+    )
+    .addSubcommand(sub =>
+      sub
+        .setName('set')
+        .setDescription('指定メンバーのニックネームをキャラ名に変更します（元の名前は自動保存）')
+        .addUserOption(opt =>
+          opt.setName('user').setDescription('対象メンバー').setRequired(true)
+        )
+        .addStringOption(opt =>
+          opt.setName('character').setDescription('キャラクター名').setRequired(true)
+        )
+        .addStringOption(opt =>
+          opt
+            .setName('format')
+            .setDescription('表示形式（デフォルト: キャラ名（元名））')
+            .setRequired(false)
+            .addChoices(
+              { name: 'キャラ名（元の名前） 例: 探偵（田中）', value: 'both' },
+              { name: 'キャラ名のみ 例: 探偵', value: 'char_only' }
+            )
+        )
+    )
+    .addSubcommand(sub =>
+      sub.setName('reset').setDescription('このBotで変更した全員のニックネームを元の名前に一括復元します')
+    )
+    .addSubcommand(sub =>
+      sub.setName('list').setDescription('現在復元対象として保存されているメンバー一覧を表示します')
+    ),
 ];
 
 // clientReady イベント
@@ -1763,6 +1875,16 @@ client.on('interactionCreate', async interaction => {
             '`/char start characters:<キャラ1,キャラ2,...> [title] [secret]` — キャラ希望選択パネルを作成',
             '`/char resolve` / `cancel` — 配役確定＆重複自動抽選／中止（作成者のみ）',
             '💡 希望が被ったキャラだけ自動でランダム抽選し、落選者＆「🎲 おまかせ」希望者を空き枠へ自動割当します！',
+          ].join('\n'),
+        },
+        nick: {
+          name: '🏷️ キャラ名ニックネーム (`/nick`)',
+          value: [
+            '`/nick from-char [format]` — 直近の `/char` 配役結果で全員のニックネームを一括変更',
+            '`/nick set user:<相手> character:<キャラ名> [format]` — 個別にキャラ名へ変更',
+            '`/nick reset` — 変更した全員のニックネームを元の名前へ一括復元',
+            '`/nick list` — 復元対象メンバーを確認',
+            '💡 `Manage Nicknames` 権限が必要です（サーバー所有者はDiscord仕様上、手動変更になります）。',
           ].join('\n'),
         },
       };
@@ -2735,9 +2857,24 @@ client.on('interactionCreate', async interaction => {
         if (res.completed) {
           session.isOpen = false;
           charSessions.delete(guildId);
+
+          // /nick from-char 連携用に確定結果を保存
+          const savedAssignments = [];
+          session.assigned.forEach((a, i) => {
+            if (a) savedAssignments.push({ userId: a.id, charName: session.characters[i] });
+          });
+          if (savedAssignments.length > 0) lastCharResults.set(guildId, savedAssignments);
+
           const resultEmbed = session.buildResultEmbed(res.overflowUsers);
+          const nickRow = new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+              .setCustomId('nick_apply_char')
+              .setLabel('ニックネームをキャラ名に変更 (GM)')
+              .setEmoji('🏷️')
+              .setStyle(ButtonStyle.Primary)
+          );
           if (session.message) {
-            await session.message.edit({ embeds: [resultEmbed], components: session.buildButtonRows(true) }).catch(console.error);
+            await session.message.edit({ embeds: [resultEmbed], components: [nickRow] }).catch(console.error);
           }
           console.log(`[Char] 配役決め「${session.title}」を確定しました。`);
           return interaction.reply({
@@ -2773,6 +2910,170 @@ client.on('interactionCreate', async interaction => {
           content: '🗑️ 配役決めを中止しました。',
           flags: MessageFlags.Ephemeral,
         });
+      }
+    }
+
+    // 🏷️ キャラ名ニックネーム一括変更・復元コマンド (/nick)
+    if (interaction.commandName === 'nick') {
+      const sub = interaction.options.getSubcommand();
+      const guildId = interaction.guildId;
+
+      if (sub === 'list') {
+        const savedMap = getSavedNickMap(guildId);
+        if (savedMap.size === 0) {
+          return interaction.reply({
+            content: '📋 現在、元に戻す対象のニックネームは保存されていません。',
+            flags: MessageFlags.Ephemeral,
+          });
+        }
+        const lines = [...savedMap.entries()].map(
+          ([uid, info]) => `・<@${uid}>（元の名前: **${info.originalDisplayName}**）`
+        );
+        const embed = new EmbedBuilder()
+          .setTitle('🏷️ ニックネーム変更中メンバー（復元対象）')
+          .setDescription(lines.join('\n').slice(0, 4000))
+          .setColor(0x3498DB)
+          .setFooter({ text: '/nick reset で全員のニックネームを元に戻せます' })
+          .setTimestamp();
+        return interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
+      }
+
+      // 権限チェック（from-char / set / reset）
+      if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageNicknames)) {
+        return interaction.reply({
+          content: '❌ このコマンドを実行するには「ニックネームの管理（Manage Nicknames）」権限が必要です。',
+          flags: MessageFlags.Ephemeral,
+        });
+      }
+      const botMember = interaction.guild.members.me;
+      if (!botMember?.permissions.has(PermissionFlagsBits.ManageNicknames)) {
+        return interaction.reply({
+          content: '❌ Botに「ニックネームの管理（Manage Nicknames）」権限がありません。サーバー設定またはロール設定でBotに権限を付与してください。',
+          flags: MessageFlags.Ephemeral,
+        });
+      }
+
+      // /nick from-char
+      if (sub === 'from-char') {
+        const assignments = lastCharResults.get(guildId);
+        if (!assignments || assignments.length === 0) {
+          return interaction.reply({
+            content: '❌ 直近の `/char` 配役確定結果が見つかりません。先に `/char start` → 配役確定を行うか、`/nick set` で個別に設定してください。',
+            flags: MessageFlags.Ephemeral,
+          });
+        }
+
+        const format = interaction.options.getString('format') || 'both';
+        await interaction.deferReply();
+
+        const { succeeded, failed } = await applyCharacterNicknames({
+          guild: interaction.guild,
+          assignments,
+          format,
+          requestedByTag: interaction.user.tag,
+        });
+
+        const embed = new EmbedBuilder()
+          .setTitle('🏷️ ニックネームをキャラクター名に変更しました！')
+          .setColor(0x2ECC71)
+          .setDescription(
+            succeeded.length > 0
+              ? succeeded.map(s => `・${s.baseName} → **${s.newNick}**`).join('\n')
+              : '変更できたメンバーはいませんでした。'
+          )
+          .setFooter({ text: 'セッション終了後は /nick reset で全員元の名前に戻せます' })
+          .setTimestamp();
+
+        if (failed.length > 0) {
+          embed.addFields({
+            name: '⚠️ 自動変更できなかったメンバー（手動変更をお願いします）',
+            value: failed.map(f => `・${f.name}${f.newNick ? ` → \`${f.newNick}\`` : ''}（${f.reason}）`).join('\n').slice(0, 1024),
+          });
+        }
+
+        console.log(`[Nick] ${succeeded.length}名のニックネームを変更しました（失敗: ${failed.length}名）。`);
+        return interaction.editReply({ embeds: [embed] });
+      }
+
+      // /nick set
+      if (sub === 'set') {
+        const targetUser = interaction.options.getUser('user');
+        const charName = interaction.options.getString('character').trim();
+        const format = interaction.options.getString('format') || 'both';
+
+        await interaction.deferReply();
+
+        const { succeeded, failed } = await applyCharacterNicknames({
+          guild: interaction.guild,
+          assignments: [{ userId: targetUser.id, charName }],
+          format,
+          requestedByTag: interaction.user.tag,
+        });
+
+        if (succeeded.length > 0) {
+          const s = succeeded[0];
+          return interaction.editReply({
+            content: `🏷️ **${s.baseName}** のニックネームを **${s.newNick}** に変更しました！（元に戻すときは \`/nick reset\`）`,
+          });
+        }
+        const f = failed[0];
+        return interaction.editReply({
+          content: `⚠️ **${f?.name || targetUser.username}** のニックネームを変更できませんでした（${f?.reason || '権限不足'}）。${f?.newNick ? `\n手動で \`${f.newNick}\` に変更してください。` : ''}`,
+        });
+      }
+
+      // /nick reset
+      if (sub === 'reset') {
+        const savedMap = getSavedNickMap(guildId);
+        if (savedMap.size === 0) {
+          return interaction.reply({
+            content: 'ℹ️ 元に戻す対象のニックネームはありません。',
+            flags: MessageFlags.Ephemeral,
+          });
+        }
+
+        await interaction.deferReply();
+
+        const restored = [];
+        const failed = [];
+        const entries = [...savedMap.entries()];
+
+        await Promise.allSettled(
+          entries.map(async ([userId, info]) => {
+            const member = await interaction.guild.members.fetch(userId).catch(() => null);
+            if (!member) {
+              savedMap.delete(userId);
+              return;
+            }
+            try {
+              await member.setNickname(info.originalNick, `マダミス終了・ニックネーム復元 (by ${interaction.user.tag})`);
+              restored.push(info.originalDisplayName);
+              savedMap.delete(userId);
+            } catch (err) {
+              failed.push(info.originalDisplayName);
+            }
+          })
+        );
+
+        const embed = new EmbedBuilder()
+          .setTitle('🔄 ニックネームを元の名前に復元しました！')
+          .setColor(0x3498DB)
+          .setDescription(
+            restored.length > 0
+              ? `復元完了 (${restored.length}名):\n${restored.map(n => `・${n}`).join('\n')}`
+              : '復元できたメンバーはいませんでした。'
+          )
+          .setTimestamp();
+
+        if (failed.length > 0) {
+          embed.addFields({
+            name: '⚠️ 復元できなかったメンバー',
+            value: failed.join(', '),
+          });
+        }
+
+        console.log(`[Nick Reset] ${restored.length}名のニックネームを復元しました。`);
+        return interaction.editReply({ embeds: [embed] });
       }
     }
 
@@ -3156,6 +3457,61 @@ client.on('interactionCreate', async interaction => {
       }
     }
 
+    // 🏷️ /char 確定メッセージの「ニックネーム一括変更」ボタン処理
+    if (interaction.customId === 'nick_apply_char') {
+      if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageNicknames)) {
+        return interaction.reply({
+          content: '❌ このボタンを操作するには「ニックネームの管理（Manage Nicknames）」権限が必要です。',
+          flags: MessageFlags.Ephemeral,
+        });
+      }
+      const botMember = interaction.guild.members.me;
+      if (!botMember?.permissions.has(PermissionFlagsBits.ManageNicknames)) {
+        return interaction.reply({
+          content: '❌ Botに「ニックネームの管理（Manage Nicknames）」権限がありません。サーバー設定またはロール設定でBotに権限を付与してください。',
+          flags: MessageFlags.Ephemeral,
+        });
+      }
+
+      const assignments = lastCharResults.get(guildId);
+      if (!assignments || assignments.length === 0) {
+        return interaction.reply({
+          content: '❌ 配役データが見つかりませんでした。`/nick set` で個別に設定してください。',
+          flags: MessageFlags.Ephemeral,
+        });
+      }
+
+      await interaction.deferReply();
+
+      const { succeeded, failed } = await applyCharacterNicknames({
+        guild: interaction.guild,
+        assignments,
+        format: 'both',
+        requestedByTag: interaction.user.tag,
+      });
+
+      const embed = new EmbedBuilder()
+        .setTitle('🏷️ ニックネームをキャラクター名に変更しました！')
+        .setColor(0x2ECC71)
+        .setDescription(
+          succeeded.length > 0
+            ? succeeded.map(s => `・${s.baseName} → **${s.newNick}**`).join('\n')
+            : '変更できたメンバーはいませんでした。'
+        )
+        .setFooter({ text: 'セッション終了後は /nick reset で全員元の名前に戻せます' })
+        .setTimestamp();
+
+      if (failed.length > 0) {
+        embed.addFields({
+          name: '⚠️ 自動変更できなかったメンバー（手動変更をお願いします）',
+          value: failed.map(f => `・${f.name}${f.newNick ? ` → \`${f.newNick}\`` : ''}（${f.reason}）`).join('\n').slice(0, 1024),
+        });
+      }
+
+      console.log(`[Nick Button] ${succeeded.length}名のニックネームを変更しました（失敗: ${failed.length}名）。`);
+      return interaction.editReply({ embeds: [embed] });
+    }
+
     // 🎭 キャラクター配役ボタン処理
     if (interaction.customId.startsWith('char_')) {
       const charSession = charSessions.get(guildId);
@@ -3183,10 +3539,25 @@ client.on('interactionCreate', async interaction => {
           if (res.completed) {
             charSession.isOpen = false;
             charSessions.delete(guildId);
+
+            // /nick from-char 連携用に確定結果を保存
+            const savedAssignments = [];
+            charSession.assigned.forEach((a, i) => {
+              if (a) savedAssignments.push({ userId: a.id, charName: charSession.characters[i] });
+            });
+            if (savedAssignments.length > 0) lastCharResults.set(guildId, savedAssignments);
+
             const resultEmbed = charSession.buildResultEmbed(res.overflowUsers);
+            const nickRow = new ActionRowBuilder().addComponents(
+              new ButtonBuilder()
+                .setCustomId('nick_apply_char')
+                .setLabel('ニックネームをキャラ名に変更 (GM)')
+                .setEmoji('🏷️')
+                .setStyle(ButtonStyle.Primary)
+            );
             await interaction.update({
               embeds: [resultEmbed],
-              components: charSession.buildButtonRows(true),
+              components: [nickRow],
             });
             await interaction.followUp({
               content: `🎭 **【配役確定！】** 「${charSession.title}」の配役が決定しました！`,

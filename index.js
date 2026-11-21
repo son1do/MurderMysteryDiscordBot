@@ -44,6 +44,23 @@ const client = new Client({
 // サーバーごとのタイマーセッション管理: Map<guildId, TimerSession>
 const activeTimers = new Map();
 
+// サーバーごとのPLリスト管理: Map<guildId, string[]>
+const plLists = new Map();
+
+function getPlList(guildId) {
+  if (!plLists.has(guildId)) plLists.set(guildId, []);
+  return plLists.get(guildId);
+}
+
+function shuffleArray(arr) {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
 /**
  * ボイスチャンネルに接続する共通関数（自動クリーンアップ＆タイムアウト20秒）
  */
@@ -412,7 +429,41 @@ const commands = [
         .setName('comment')
         .setDescription('ダイスを振る理由・項目名（例: 調査、発言順決め）')
         .setRequired(false)
+    ),
+  new SlashCommandBuilder()
+    .setName('pl')
+    .setDescription('PLリストを管理し、発言順シャッフルやランダム選択を行います')
+    .addSubcommand(sub =>
+      sub
+        .setName('add')
+        .setDescription('PLをリストに追加します')
+        .addStringOption(opt =>
+          opt.setName('name').setDescription('PL名（プレイヤー名）').setRequired(true)
+        )
     )
+    .addSubcommand(sub =>
+      sub
+        .setName('remove')
+        .setDescription('PLをリストから削除します')
+        .addStringOption(opt =>
+          opt.setName('name').setDescription('削除するPL名').setRequired(true)
+        )
+    )
+    .addSubcommand(sub =>
+      sub.setName('list').setDescription('現在のPLリストを表示します')
+    )
+    .addSubcommand(sub =>
+      sub.setName('clear').setDescription('PLリストをリセットします')
+    )
+    .addSubcommand(sub =>
+      sub.setName('from-vc').setDescription('あなたがいるVCの全メンバー（Bot除く）をPLリストに一括登録します')
+    )
+    .addSubcommand(sub =>
+      sub.setName('shuffle').setDescription('PLをシャッフルして発言順を表示します')
+    )
+    .addSubcommand(sub =>
+      sub.setName('pick').setDescription('PLの中からランダムに1人選びます（ルーレット演出）')
+    ),
 ];
 
 // clientReady イベント
@@ -495,6 +546,134 @@ client.on('interactionCreate', async interaction => {
       }
 
       return interaction.reply({ embeds: [embed] });
+    }
+
+    // 🎭 PLコマンド (/pl)
+    if (interaction.commandName === 'pl') {
+      const sub = interaction.options.getSubcommand();
+      const guildId = interaction.guildId;
+      const pls = getPlList(guildId);
+
+      // /pl add
+      if (sub === 'add') {
+        const name = interaction.options.getString('name').trim();
+        if (pls.includes(name)) {
+          return interaction.reply({ content: `⚠️ **${name}** はすでにリストに登録されています。`, flags: MessageFlags.Ephemeral });
+        }
+        if (pls.length >= 30) {
+          return interaction.reply({ content: '❌ PLリストは最大30名までです。', flags: MessageFlags.Ephemeral });
+        }
+        pls.push(name);
+        return interaction.reply({ content: `✅ **${name}** をPLリストに追加しました。（現在: ${pls.length}名）` });
+      }
+
+      // /pl remove
+      if (sub === 'remove') {
+        const name = interaction.options.getString('name').trim();
+        const idx = pls.indexOf(name);
+        if (idx === -1) {
+          return interaction.reply({ content: `❌ **${name}** はPLリストに存在しません。`, flags: MessageFlags.Ephemeral });
+        }
+        pls.splice(idx, 1);
+        return interaction.reply({ content: `🗑️ **${name}** をPLリストから削除しました。（残り: ${pls.length}名）` });
+      }
+
+      // /pl list
+      if (sub === 'list') {
+        if (pls.length === 0) {
+          return interaction.reply({ content: '📋 PLリストは空です。`/pl add` でPLを追加してください。', flags: MessageFlags.Ephemeral });
+        }
+        const embed = new EmbedBuilder()
+          .setTitle('👥 現在のPLリスト')
+          .setDescription(pls.map((name, i) => `**${i + 1}.** ${name}`).join('\n'))
+          .setColor(0x3498DB)
+          .setFooter({ text: `合計 ${pls.length} 名` })
+          .setTimestamp();
+        return interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
+      }
+
+      // /pl clear
+      if (sub === 'clear') {
+        const prevCount = pls.length;
+        pls.length = 0;
+        return interaction.reply({ content: `🗑️ PLリストをリセットしました。（${prevCount}名 → 0名）` });
+      }
+
+      // /pl from-vc
+      if (sub === 'from-vc') {
+        const memberVoice = interaction.member.voice;
+        if (!memberVoice || !memberVoice.channel) {
+          return interaction.reply({ content: '❌ あなたがボイスチャンネル（VC）に接続していません。', flags: MessageFlags.Ephemeral });
+        }
+        const vcNames = memberVoice.channel.members
+          .filter(m => !m.user.bot)
+          .map(m => m.displayName);
+        if (vcNames.length === 0) {
+          return interaction.reply({ content: '❌ VCにBot以外のメンバーがいません。', flags: MessageFlags.Ephemeral });
+        }
+        pls.length = 0;
+        pls.push(...vcNames);
+        const embed = new EmbedBuilder()
+          .setTitle('👥 VCからPLリストを登録しました')
+          .setDescription(pls.map((name, i) => `**${i + 1}.** ${name}`).join('\n'))
+          .setColor(0x2ECC71)
+          .setFooter({ text: `合計 ${pls.length} 名` })
+          .setTimestamp();
+        return interaction.reply({ embeds: [embed] });
+      }
+
+      // /pl shuffle
+      if (sub === 'shuffle') {
+        if (pls.length < 2) {
+          return interaction.reply({ content: '❌ シャッフルするにはPLが2名以上必要です。`/pl add` でPLを追加してください。', flags: MessageFlags.Ephemeral });
+        }
+        const shuffled = shuffleArray(pls);
+        const medals = ['🥇', '🥈', '🥉'];
+        const orderText = shuffled.map((name, i) => {
+          const prefix = medals[i] ?? `**${i + 1}.**`;
+          return `${prefix} ${name}`;
+        }).join('\n');
+        const embed = new EmbedBuilder()
+          .setTitle('🔀 発言順シャッフル結果')
+          .setDescription(orderText)
+          .setColor(0x9B59B6)
+          .setFooter({ text: `${pls.length}名をシャッフルしました` })
+          .setTimestamp();
+        return interaction.reply({ embeds: [embed] });
+      }
+
+      // /pl pick — ルーレット演出
+      if (sub === 'pick') {
+        if (pls.length === 0) {
+          return interaction.reply({ content: '❌ PLリストが空です。`/pl add` でPLを追加してください。', flags: MessageFlags.Ephemeral });
+        }
+
+        // 先に当選者を決定（アニメーション中に変わらないように）
+        const winner = pls[Math.floor(Math.random() * pls.length)];
+
+        await interaction.deferReply();
+
+        // ルーレットアニメーション（段々スローになる）
+        const delays = [220, 280, 350, 480, 650];
+        for (const delay of delays) {
+          const rnd = pls[Math.floor(Math.random() * pls.length)];
+          const spinEmbed = new EmbedBuilder()
+            .setTitle('🎰 ルーレット中...')
+            .setDescription(`# ${rnd}`)
+            .setColor(0xF39C12);
+          await interaction.editReply({ embeds: [spinEmbed] });
+          await new Promise(r => setTimeout(r, delay));
+        }
+
+        // 結果発表
+        const finalEmbed = new EmbedBuilder()
+          .setTitle('🎯 選ばれたPL')
+          .setDescription(`# 🎉 ${winner}`)
+          .setColor(0xE74C3C)
+          .setFooter({ text: `${pls.length}名の中からランダムに選出` })
+          .setTimestamp();
+        return interaction.editReply({ embeds: [finalEmbed] });
+      }
     }
 
     if (interaction.commandName !== 'timer') return;

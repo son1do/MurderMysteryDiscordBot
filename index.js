@@ -439,6 +439,11 @@ function buildButtonRow(isPaused) {
       .setEmoji('➕')
       .setStyle(ButtonStyle.Secondary),
     new ButtonBuilder()
+      .setCustomId('timer_add_3m')
+      .setLabel('+3分')
+      .setEmoji('➕')
+      .setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder()
       .setCustomId('timer_add_5m')
       .setLabel('+5分')
       .setEmoji('➕')
@@ -1626,6 +1631,14 @@ client.on('interactionCreate', async interaction => {
         await session.addSeconds(60);
         await interaction.reply({
           content: '➕ 時間を 1分 追加しました。',
+          flags: MessageFlags.Ephemeral
+        });
+        break;
+      }
+      case 'timer_add_3m': {
+        await session.addSeconds(180);
+        await interaction.reply({
+          content: '➕ 時間を 3分 追加しました。',
           flags: MessageFlags.Ephemeral
         });
         break;

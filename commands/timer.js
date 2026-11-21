@@ -16,7 +16,7 @@ const {
 } = require('@discordjs/voice');
 const { activeTimers } = require('../lib/state');
 const { parseDuration, formatTime, createProgressBar } = require('../lib/utils');
-const { SOUNDS_DIR, connectToVoice } = require('../lib/voice');
+const { SOUNDS_DIR, connectToVoice, cancelEmptyVcTimer } = require('../lib/voice');
 
 function buildTimerEmbed(session) {
   const percent = session.totalSeconds > 0
@@ -319,6 +319,7 @@ module.exports = {
           flags: MessageFlags.Ephemeral,
         });
       }
+      cancelEmptyVcTimer(guildId);
       connection.destroy();
       console.log('[Voice] ボイスチャンネルから退出しました。');
       return interaction.reply({ content: '👋 ボイスチャンネルから退出しました。' });

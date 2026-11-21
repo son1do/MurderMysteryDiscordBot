@@ -18,6 +18,7 @@ const {
   ActivityType,
   MessageFlags,
 } = require('discord.js');
+const { checkAndScheduleAutoDisconnect } = require('./lib/voice');
 
 const client = new Client({
   intents: [
@@ -120,6 +121,12 @@ client.on('interactionCreate', async interaction => {
       await interaction.reply(errPayload).catch(() => {});
     }
   }
+});
+
+// VC入退出・移動時に無人自動切断チェックを実行
+client.on('voiceStateUpdate', (oldState, newState) => {
+  const guild = newState.guild || oldState.guild;
+  checkAndScheduleAutoDisconnect(guild);
 });
 
 const token = process.env.DISCORD_TOKEN;

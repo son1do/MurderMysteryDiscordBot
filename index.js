@@ -254,6 +254,86 @@ async function connectToVoice(voiceChannel, guild) {
 }
 
 /**
+ * 他のVCにいるメンバーを指定のVCへ一斉集合させる共通関数
+ */
+async function gatherMembersToVoice({ guild, targetChannel, requestedByTag, sameCategory = true, includeBots = false }) {
+  const afkChannelId = guild.afkChannelId;
+
+  const sourceChannels = guild.channels.cache.filter(ch => {
+    if (ch.type !== ChannelType.GuildVoice) return false;
+    if (ch.id === targetChannel.id) return false;
+    if (afkChannelId && ch.id === afkChannelId) return false;
+    if (sameCategory && targetChannel.parentId && ch.parentId !== targetChannel.parentId) return false;
+    return true;
+  });
+
+  const moveTargets = [];
+  for (const [, ch] of sourceChannels) {
+    for (const [, member] of ch.members) {
+      if (!includeBots && member.user.bot) continue;
+      moveTargets.push({ member, fromChannelName: ch.name });
+    }
+  }
+
+  const scopeLabel = sameCategory && targetChannel.parentId
+    ? `同じカテゴリー（${targetChannel.parent?.name || '不明'}）内の他VC`
+    : 'サーバー内の他VC';
+
+  if (moveTargets.length === 0) {
+    return { totalTargets: 0, movedCount: 0, movedByChannel: new Map(), failed: [], scopeLabel };
+  }
+
+  const results = await Promise.allSettled(
+    moveTargets.map(async ({ member, fromChannelName }) => {
+      await member.voice.setChannel(targetChannel, `VC全員集合 (by ${requestedByTag})`);
+      return { name: member.displayName, fromChannelName };
+    })
+  );
+
+  const movedByChannel = new Map();
+  const failed = [];
+  results.forEach((res, i) => {
+    if (res.status === 'fulfilled') {
+      const { name, fromChannelName } = res.value;
+      if (!movedByChannel.has(fromChannelName)) movedByChannel.set(fromChannelName, []);
+      movedByChannel.get(fromChannelName).push(name);
+    } else {
+      failed.push(moveTargets[i].member.displayName);
+    }
+  });
+
+  const movedCount = moveTargets.length - failed.length;
+  return { totalTargets: moveTargets.length, movedCount, movedByChannel, failed, scopeLabel };
+}
+
+/**
+ * 集合結果のEmbedを生成
+ */
+function buildGatherResultEmbed({ targetChannel, movedCount, movedByChannel, failed, sameCategory }) {
+  const breakdownLines = [...movedByChannel.entries()].map(
+    ([chName, names]) => `・🔊 **${chName}** → ${names.join(', ')}`
+  );
+
+  const embed = new EmbedBuilder()
+    .setTitle(`📢 メンバーを「${targetChannel.name}」に集合させました！`)
+    .setColor(0x2ECC71)
+    .setDescription(
+      breakdownLines.length > 0
+        ? breakdownLines.join('\n')
+        : '移動できたメンバーはいませんでした。'
+    )
+    .setFooter({
+      text: `移動完了: ${movedCount}名${failed.length > 0 ? ` / 失敗: ${failed.length}名` : ''}${sameCategory && targetChannel.parentId ? ' ｜ 同カテゴリー内のみ対象' : ' ｜ サーバー全体対象'}`
+    })
+    .setTimestamp();
+
+  if (failed.length > 0) {
+    embed.addFields({ name: '⚠️ 移動できなかったメンバー', value: failed.join(', ') });
+  }
+  return embed;
+}
+
+/**
  * 時間文字列 (例: "15m", "15", "1h30m", "90s") を秒数に変換
  */
 function parseDuration(input) {
@@ -518,8 +598,18 @@ class TimerSession {
     }
 
     if (!manual) {
+      const voiceChannelId = this.voiceConnection?.joinConfig?.channelId;
+      const gatherRow = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(voiceChannelId ? `vc_gather_${voiceChannelId}` : 'vc_gather_caller')
+          .setLabel('全員をこのVCに集合させる')
+          .setEmoji('📢')
+          .setStyle(ButtonStyle.Primary)
+      );
+
       this.textChannel.send({
-        content: `🚨 **【時間終了】** 議論フェーズが終了しました！マイクをミュートにするか、次の指示に従ってください。`
+        content: `🚨 **【時間終了】** 「**${this.title}**」が終了しました！マイクをミュートにするか、次の指示に従ってください。`,
+        components: [gatherRow]
       }).catch(console.error);
       this.playChime('finish.wav');
     }
@@ -1087,82 +1177,30 @@ client.on('interactionCreate', async interaction => {
 
         const sameCategory = interaction.options.getBoolean('same_category') ?? true;
         const includeBots = interaction.options.getBoolean('include_bots') ?? false;
-        const afkChannelId = interaction.guild.afkChannelId;
-
-        // 対象となる他のVCを抽出
-        const sourceChannels = interaction.guild.channels.cache.filter(ch => {
-          if (ch.type !== ChannelType.GuildVoice) return false;
-          if (ch.id === targetChannel.id) return false;
-          if (afkChannelId && ch.id === afkChannelId) return false;
-          if (sameCategory && targetChannel.parentId && ch.parentId !== targetChannel.parentId) return false;
-          return true;
-        });
-
-        // 移動対象メンバーを収集
-        const moveTargets = [];
-        for (const [, ch] of sourceChannels) {
-          for (const [, member] of ch.members) {
-            if (!includeBots && member.user.bot) continue;
-            moveTargets.push({ member, fromChannelName: ch.name });
-          }
-        }
-
-        if (moveTargets.length === 0) {
-          const scopeLabel = sameCategory && targetChannel.parentId
-            ? `同じカテゴリー（${targetChannel.parent?.name || '不明'}）内の他VC`
-            : 'サーバー内の他VC';
-          return interaction.reply({
-            content: `ℹ️ ${scopeLabel}に移動対象のメンバーはいませんでした。`,
-            flags: MessageFlags.Ephemeral,
-          });
-        }
 
         await interaction.deferReply();
 
-        // 一斉移動を実行
-        const results = await Promise.allSettled(
-          moveTargets.map(async ({ member, fromChannelName }) => {
-            await member.voice.setChannel(targetChannel, `VC全員集合 (/vc gather by ${interaction.user.tag})`);
-            return { name: member.displayName, fromChannelName };
-          })
-        );
-
-        const movedByChannel = new Map();
-        const failed = [];
-
-        results.forEach((res, i) => {
-          if (res.status === 'fulfilled') {
-            const { name, fromChannelName } = res.value;
-            if (!movedByChannel.has(fromChannelName)) movedByChannel.set(fromChannelName, []);
-            movedByChannel.get(fromChannelName).push(name);
-          } else {
-            failed.push(moveTargets[i].member.displayName);
-          }
+        const gatherResult = await gatherMembersToVoice({
+          guild: interaction.guild,
+          targetChannel,
+          requestedByTag: interaction.user.tag,
+          sameCategory,
+          includeBots,
         });
 
-        const movedCount = moveTargets.length - failed.length;
-        const breakdownLines = [...movedByChannel.entries()].map(
-          ([chName, names]) => `・🔊 **${chName}** → ${names.join(', ')}`
-        );
-
-        const embed = new EmbedBuilder()
-          .setTitle(`📢 メンバーを「${targetChannel.name}」に集合させました！`)
-          .setColor(0x2ECC71)
-          .setDescription(
-            breakdownLines.length > 0
-              ? breakdownLines.join('\n')
-              : '移動できたメンバーはいませんでした。'
-          )
-          .setFooter({
-            text: `移動完了: ${movedCount}名${failed.length > 0 ? ` / 失敗: ${failed.length}名` : ''}${sameCategory && targetChannel.parentId ? ' ｜ 同カテゴリー内のみ対象' : ' ｜ サーバー全体対象'}`
-          })
-          .setTimestamp();
-
-        if (failed.length > 0) {
-          embed.addFields({ name: '⚠️ 移動できなかったメンバー', value: failed.join(', ') });
+        if (gatherResult.totalTargets === 0) {
+          return interaction.editReply({
+            content: `ℹ️ ${gatherResult.scopeLabel}に移動対象のメンバーはいませんでした。`,
+          });
         }
 
-        console.log(`[VC Gather] ${movedCount}名を「${targetChannel.name}」に移動しました。`);
+        const embed = buildGatherResultEmbed({
+          targetChannel,
+          ...gatherResult,
+          sameCategory,
+        });
+
+        console.log(`[VC Gather] ${gatherResult.movedCount}名を「${targetChannel.name}」に移動しました。`);
         return interaction.editReply({ embeds: [embed] });
       }
 
@@ -1426,6 +1464,61 @@ client.on('interactionCreate', async interaction => {
   // ボタン操作処理
   if (interaction.isButton()) {
     const guildId = interaction.guildId;
+
+    // 📢 タイマー終了メッセージの「全員集合」ボタン処理
+    if (interaction.customId.startsWith('vc_gather_')) {
+      if (!interaction.memberPermissions?.has(PermissionFlagsBits.MoveMembers)) {
+        return interaction.reply({
+          content: '❌ このボタンを操作するには「メンバーを移動（Move Members）」権限が必要です。',
+          flags: MessageFlags.Ephemeral,
+        });
+      }
+
+      const botMember = interaction.guild.members.me;
+      if (!botMember?.permissions.has(PermissionFlagsBits.MoveMembers)) {
+        return interaction.reply({
+          content: '❌ Botに「メンバーを移動（Move Members）」権限がありません。サーバー設定またはロール設定でBotに権限を付与してください。',
+          flags: MessageFlags.Ephemeral,
+        });
+      }
+
+      const targetId = interaction.customId.replace('vc_gather_', '');
+      const targetChannel = targetId !== 'caller'
+        ? (interaction.guild.channels.cache.get(targetId) || interaction.member.voice?.channel)
+        : interaction.member.voice?.channel;
+
+      if (!targetChannel || targetChannel.type !== ChannelType.GuildVoice) {
+        return interaction.reply({
+          content: '❌ 集合先のVCが見つかりません。集合先のVCに入ってからボタンを押してください。',
+          flags: MessageFlags.Ephemeral,
+        });
+      }
+
+      await interaction.deferReply();
+
+      const gatherResult = await gatherMembersToVoice({
+        guild: interaction.guild,
+        targetChannel,
+        requestedByTag: interaction.user.tag,
+        sameCategory: true,
+        includeBots: false,
+      });
+
+      if (gatherResult.totalTargets === 0) {
+        return interaction.editReply({
+          content: `ℹ️ ${gatherResult.scopeLabel}に移動対象のメンバーはいませんでした。`,
+        });
+      }
+
+      const embed = buildGatherResultEmbed({
+        targetChannel,
+        ...gatherResult,
+        sameCategory: true,
+      });
+
+      console.log(`[VC Gather Button] ${gatherResult.movedCount}名を「${targetChannel.name}」に移動しました。`);
+      return interaction.editReply({ embeds: [embed] });
+    }
 
     // 🗳️ 投票ボタン処理
     if (interaction.customId.startsWith('vote_')) {

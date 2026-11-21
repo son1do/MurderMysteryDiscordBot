@@ -30,6 +30,7 @@ const client = new Client({
 // commands/ フォルダから全コマンドを自動読み込み
 const commandMap = new Map();
 const buttonHandlers = [];
+const selectMenuHandlers = [];
 const commandsJson = [];
 
 const commandsDir = path.join(__dirname, 'commands');
@@ -48,6 +49,12 @@ for (const file of commandFiles) {
   if (Array.isArray(cmd.buttonPrefixes) && typeof cmd.handleButton === 'function') {
     for (const prefix of cmd.buttonPrefixes) {
       buttonHandlers.push({ prefix, handler: cmd.handleButton, source: file });
+    }
+  }
+
+  if (Array.isArray(cmd.selectMenuPrefixes) && typeof cmd.handleSelectMenu === 'function') {
+    for (const prefix of cmd.selectMenuPrefixes) {
+      selectMenuHandlers.push({ prefix, handler: cmd.handleSelectMenu, source: file });
     }
   }
 }
@@ -91,6 +98,13 @@ client.on('interactionCreate', async interaction => {
 
     if (interaction.isButton()) {
       const matched = buttonHandlers.find(({ prefix }) => interaction.customId.startsWith(prefix));
+      if (!matched) return;
+      await matched.handler(interaction);
+      return;
+    }
+
+    if (interaction.isStringSelectMenu()) {
+      const matched = selectMenuHandlers.find(({ prefix }) => interaction.customId.startsWith(prefix));
       if (!matched) return;
       await matched.handler(interaction);
     }

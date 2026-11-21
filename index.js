@@ -1199,6 +1199,38 @@ const commands = [
             .setDescription('Botのミュートも解除するか（デフォルト: False）')
             .setRequired(false)
         )
+    )
+    .addSubcommand(sub =>
+      sub
+        .setName('split')
+        .setDescription('VCのメンバーをランダムに組分けして密談VCへ一斉振り分けします')
+        .addIntegerOption(opt =>
+          opt
+            .setName('size')
+            .setDescription('1グループあたりの人数（デフォルト: 2人ペア。1人余る場合は最後の組に合流）')
+            .setMinValue(2)
+            .setMaxValue(10)
+            .setRequired(false)
+        )
+        .addChannelOption(opt =>
+          opt
+            .setName('source')
+            .setDescription('振り分け元のVC（省略時はあなたが現在いるVC）')
+            .addChannelTypes(ChannelType.GuildVoice)
+            .setRequired(false)
+        )
+        .addBooleanOption(opt =>
+          opt
+            .setName('include_self')
+            .setDescription('実行者（あなた自身）も振り分け対象に含めるか（GMレス時は True / デフォルト: False）')
+            .setRequired(false)
+        )
+        .addBooleanOption(opt =>
+          opt
+            .setName('same_category')
+            .setDescription('同じカテゴリー内の他VCのみを振り分け先にするか（デフォルト: True）')
+            .setRequired(false)
+        )
     ),
   new SlashCommandBuilder()
     .setName('help')
@@ -1385,6 +1417,7 @@ client.on('interactionCreate', async interaction => {
         vc: {
           name: '📢 VC操作 (`/vc`)',
           value: [
+            '`/vc split [size] [source] [include_self]` — VCメンバーをランダム組分けして密談VCへ一斉振り分け（デフォルト: 2人ペア）',
             '`/vc gather [target] [same_category]` — 密談VCなどに散らばったメンバーを一斉集合（デフォルト: 同カテゴリー内のみ）',
             '`/vc mute [target] [include_self]` — VCメンバーを一斉サーバーミュート（デフォルト: 実行者とBotを除く）',
             '`/vc unmute [target]` — VCメンバーのサーバーミュートを一斉解除',
@@ -1925,6 +1958,135 @@ client.on('interactionCreate', async interaction => {
 
         console.log(`[VC ${isMute ? 'Mute' : 'Unmute'}] ${succeeded.length}名を変更しました（${targetChannel.name}）。`);
         return interaction.editReply({ embeds: [embed] });
+      }
+
+      // /vc split — 密談VCへのランダム自動振り分け
+      if (sub === 'split') {
+        if (!interaction.memberPermissions?.has(PermissionFlagsBits.MoveMembers)) {
+          return interaction.reply({
+            content: '❌ このコマンドを実行するには「メンバーを移動（Move Members）」権限が必要です。',
+            flags: MessageFlags.Ephemeral,
+          });
+        }
+
+        const botMember = interaction.guild.members.me;
+        if (!botMember?.permissions.has(PermissionFlagsBits.MoveMembers)) {
+          return interaction.reply({
+            content: '❌ Botに「メンバーを移動（Move Members）」権限がありません。サーバー設定またはロール設定でBotに権限を付与してください。',
+            flags: MessageFlags.Ephemeral,
+          });
+        }
+
+        const sourceOption = interaction.options.getChannel('source');
+        const sourceChannel = sourceOption || interaction.member.voice?.channel;
+        if (!sourceChannel || sourceChannel.type !== ChannelType.GuildVoice) {
+          return interaction.reply({
+            content: '❌ 振り分け元のVCが見つかりません。VCに入ってから実行するか、`source` オプションでVCを指定してください。',
+            flags: MessageFlags.Ephemeral,
+          });
+        }
+
+        const groupSize = interaction.options.getInteger('size') ?? 2;
+        const includeSelf = interaction.options.getBoolean('include_self') ?? false;
+        const sameCategory = interaction.options.getBoolean('same_category') ?? true;
+
+        // 対象メンバー収集（Bot除く、デフォルトで実行者も除く）
+        const humanMembers = [...sourceChannel.members.values()].filter(m => {
+          if (m.user.bot) return false;
+          if (!includeSelf && m.id === interaction.user.id) return false;
+          return true;
+        });
+
+        if (humanMembers.length < 2) {
+          return interaction.reply({
+            content: `❌ 振り分け対象のメンバーが2名以上必要です（現在: ${humanMembers.length}名）。\nGMレス進行の場合は \`include_self:True\` を指定してください。`,
+            flags: MessageFlags.Ephemeral,
+          });
+        }
+
+        // シャッフル＆グループ分割（最後が1人余る場合は直前の組に合流）
+        const shuffled = shuffleArray(humanMembers);
+        const groups = [];
+        for (let i = 0; i < shuffled.length; i += groupSize) {
+          groups.push(shuffled.slice(i, i + groupSize));
+        }
+        if (groups.length >= 2 && groups[groups.length - 1].length === 1) {
+          const solo = groups.pop()[0];
+          groups[groups.length - 1].push(solo);
+        }
+
+        // 振り分け先の密談VC候補を抽出（position昇順）
+        const afkChannelId = interaction.guild.afkChannelId;
+        const destChannels = [...interaction.guild.channels.cache.values()]
+          .filter(ch => {
+            if (ch.type !== ChannelType.GuildVoice) return false;
+            if (ch.id === sourceChannel.id) return false;
+            if (afkChannelId && ch.id === afkChannelId) return false;
+            if (sameCategory && sourceChannel.parentId && ch.parentId !== sourceChannel.parentId) return false;
+            return true;
+          })
+          .sort((a, b) => a.rawPosition - b.rawPosition);
+
+        if (destChannels.length < groups.length) {
+          return interaction.reply({
+            content: `❌ 振り分け先の密談VCが足りません（必要: **${groups.length}個** / 利用可能: **${destChannels.length}個**）。\n同じカテゴリー内に密談用VCを追加するか、\`size\` を大きくしてください。`,
+            flags: MessageFlags.Ephemeral,
+          });
+        }
+
+        await interaction.deferReply();
+
+        // 各グループを対応するVCへ一斉移動
+        const moveJobs = [];
+        const groupAssignments = groups.map((members, i) => {
+          const destCh = destChannels[i];
+          members.forEach(member => {
+            moveJobs.push({ member, destCh });
+          });
+          return { destCh, members };
+        });
+
+        const results = await Promise.allSettled(
+          moveJobs.map(async ({ member, destCh }) => {
+            await member.voice.setChannel(destCh, `密談VC振り分け (/vc split by ${interaction.user.tag})`);
+            return member.displayName;
+          })
+        );
+
+        const failed = [];
+        results.forEach((res, i) => {
+          if (res.status === 'rejected') {
+            failed.push(moveJobs[i].member.displayName);
+          }
+        });
+
+        const assignmentLines = groupAssignments.map(({ destCh, members }, idx) =>
+          `**組${idx + 1}** 🔊 **${destCh.name}**\n└ ${members.map(m => m.displayName).join(' / ')}`
+        );
+
+        const embed = new EmbedBuilder()
+          .setTitle(`🔀 密談VCへランダム振り分けしました！（${groups.length}組）`)
+          .setColor(0x9B59B6)
+          .setDescription(assignmentLines.join('\n\n'))
+          .setFooter({
+            text: `移動完了: ${moveJobs.length - failed.length}名${failed.length > 0 ? ` / 失敗: ${failed.length}名` : ''} ｜ 終わったら下のボタンで全員集合できます`,
+          })
+          .setTimestamp();
+
+        if (failed.length > 0) {
+          embed.addFields({ name: '⚠️ 移動できなかったメンバー', value: failed.join(', ') });
+        }
+
+        const gatherRow = new ActionRowBuilder().addComponents(
+          new ButtonBuilder()
+            .setCustomId(`vc_gather_${sourceChannel.id}`)
+            .setLabel(`全員を「${sourceChannel.name}」に集合させる`.slice(0, 80))
+            .setEmoji('📢')
+            .setStyle(ButtonStyle.Primary)
+        );
+
+        console.log(`[VC Split] ${moveJobs.length - failed.length}名を${groups.length}つの密談VCに振り分けました。`);
+        return interaction.editReply({ embeds: [embed], components: [gatherRow] });
       }
     }
 

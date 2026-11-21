@@ -678,6 +678,48 @@ const commands = [
             .setDescription('Botも一緒に移動させるか（デフォルト: False）')
             .setRequired(false)
         )
+    )
+    .addSubcommand(sub =>
+      sub
+        .setName('mute')
+        .setDescription('VCにいるメンバー（実行者とBotを除く）を一斉サーバーミュートします')
+        .addChannelOption(opt =>
+          opt
+            .setName('target')
+            .setDescription('対象のVC（省略時はあなたが現在いるVC）')
+            .addChannelTypes(ChannelType.GuildVoice)
+            .setRequired(false)
+        )
+        .addBooleanOption(opt =>
+          opt
+            .setName('include_self')
+            .setDescription('実行者（あなた自身）もミュートするか（デフォルト: False）')
+            .setRequired(false)
+        )
+        .addBooleanOption(opt =>
+          opt
+            .setName('include_bots')
+            .setDescription('Botもミュートするか（デフォルト: False）')
+            .setRequired(false)
+        )
+    )
+    .addSubcommand(sub =>
+      sub
+        .setName('unmute')
+        .setDescription('VCにいるメンバーのサーバーミュートを一斉解除します')
+        .addChannelOption(opt =>
+          opt
+            .setName('target')
+            .setDescription('対象のVC（省略時はあなたが現在いるVC）')
+            .addChannelTypes(ChannelType.GuildVoice)
+            .setRequired(false)
+        )
+        .addBooleanOption(opt =>
+          opt
+            .setName('include_bots')
+            .setDescription('Botのミュートも解除するか（デフォルト: False）')
+            .setRequired(false)
+        )
     ),
 ];
 
@@ -1121,6 +1163,102 @@ client.on('interactionCreate', async interaction => {
         }
 
         console.log(`[VC Gather] ${movedCount}名を「${targetChannel.name}」に移動しました。`);
+        return interaction.editReply({ embeds: [embed] });
+      }
+
+      // /vc mute / /vc unmute — VCメンバーの一斉サーバーミュート・解除
+      if (sub === 'mute' || sub === 'unmute') {
+        const isMute = sub === 'mute';
+
+        if (!interaction.memberPermissions?.has(PermissionFlagsBits.MuteMembers)) {
+          return interaction.reply({
+            content: '❌ このコマンドを実行するには「メンバーをミュート（Mute Members）」権限が必要です。',
+            flags: MessageFlags.Ephemeral,
+          });
+        }
+
+        const botMember = interaction.guild.members.me;
+        if (!botMember?.permissions.has(PermissionFlagsBits.MuteMembers)) {
+          return interaction.reply({
+            content: '❌ Botに「メンバーをミュート（Mute Members）」権限がありません。サーバー設定またはロール設定でBotに権限を付与してください。',
+            flags: MessageFlags.Ephemeral,
+          });
+        }
+
+        const targetOption = interaction.options.getChannel('target');
+        const targetChannel = targetOption || interaction.member.voice?.channel;
+        if (!targetChannel || targetChannel.type !== ChannelType.GuildVoice) {
+          return interaction.reply({
+            content: '❌ 対象のVCが見つかりません。VCに入ってから実行するか、`target` オプションでVCを指定してください。',
+            flags: MessageFlags.Ephemeral,
+          });
+        }
+
+        const includeSelf = isMute ? (interaction.options.getBoolean('include_self') ?? false) : true;
+        const includeBots = interaction.options.getBoolean('include_bots') ?? false;
+
+        const targets = [];
+        for (const [, member] of targetChannel.members) {
+          if (!includeBots && member.user.bot) continue;
+          if (!includeSelf && member.id === interaction.user.id) continue;
+          // 既に同じ状態のメンバーはスキップ
+          if (isMute && member.voice.serverMute) continue;
+          if (!isMute && !member.voice.serverMute) continue;
+          targets.push(member);
+        }
+
+        if (targets.length === 0) {
+          return interaction.reply({
+            content: isMute
+              ? `ℹ️ 「**${targetChannel.name}**」に新しくミュートする対象メンバーはいませんでした。`
+              : `ℹ️ 「**${targetChannel.name}**」にサーバーミュート中のメンバーはいませんでした。`,
+            flags: MessageFlags.Ephemeral,
+          });
+        }
+
+        await interaction.deferReply();
+
+        const results = await Promise.allSettled(
+          targets.map(async member => {
+            await member.voice.setMute(isMute, `VC一斉${isMute ? 'ミュート' : 'ミュート解除'} (/vc ${sub} by ${interaction.user.tag})`);
+            return member.displayName;
+          })
+        );
+
+        const succeeded = [];
+        const failed = [];
+        results.forEach((res, i) => {
+          if (res.status === 'fulfilled') {
+            succeeded.push(res.value);
+          } else {
+            failed.push(targets[i].displayName);
+          }
+        });
+
+        const embed = new EmbedBuilder()
+          .setTitle(
+            isMute
+              ? `🔇 「${targetChannel.name}」のメンバーを一斉ミュートしました`
+              : `🔊 「${targetChannel.name}」のメンバーのミュートを解除しました`
+          )
+          .setColor(isMute ? 0xE67E22 : 0x2ECC71)
+          .setDescription(
+            succeeded.length > 0
+              ? `対象メンバー (${succeeded.length}名):\n${succeeded.map(n => `・${n}`).join('\n')}`
+              : '対象メンバーを処理できませんでした。'
+          )
+          .setFooter({
+            text: isMute
+              ? `解除するときは /vc unmute を実行してください${failed.length > 0 ? ` ｜ 失敗: ${failed.length}名` : ''}`
+              : `完了: ${succeeded.length}名${failed.length > 0 ? ` ｜ 失敗: ${failed.length}名` : ''}`
+          })
+          .setTimestamp();
+
+        if (failed.length > 0) {
+          embed.addFields({ name: '⚠️ 変更できなかったメンバー', value: failed.join(', ') });
+        }
+
+        console.log(`[VC ${isMute ? 'Mute' : 'Unmute'}] ${succeeded.length}名を変更しました（${targetChannel.name}）。`);
         return interaction.editReply({ embeds: [embed] });
       }
     }

@@ -397,6 +397,21 @@ const commands = [
               { name: '終了アラーム (ピピピッ)', value: 'finish.wav' }
             )
         )
+    ),
+  new SlashCommandBuilder()
+    .setName('dice')
+    .setDescription('ダイス（サイコロ）を振ります')
+    .addStringOption(opt =>
+      opt
+        .setName('roll')
+        .setDescription('ダイスの形式（例: 1d100, 2d6, 1d6, 100）。省略時は 1d100')
+        .setRequired(false)
+    )
+    .addStringOption(opt =>
+      opt
+        .setName('comment')
+        .setDescription('ダイスを振る理由・項目名（例: 調査、発言順決め）')
+        .setRequired(false)
     )
 ];
 
@@ -423,6 +438,65 @@ client.once('clientReady', async () => {
 // スラッシュコマンド処理
 client.on('interactionCreate', async interaction => {
   if (interaction.isChatInputCommand()) {
+    // 🎲 ダイスコマンド (/dice)
+    if (interaction.commandName === 'dice') {
+      const rollInput = (interaction.options.getString('roll') || '1d100').trim().toLowerCase();
+      const comment = interaction.options.getString('comment');
+
+      let count = 1;
+      let sides = 100;
+
+      // "2d6", "1d100", "d6" 形式
+      const diceMatch = rollInput.match(/^(\d*)d(\d+)$/);
+      // "100", "6" などの数値形式
+      const numberMatch = rollInput.match(/^(\d+)$/);
+
+      if (diceMatch) {
+        count = diceMatch[1] ? parseInt(diceMatch[1], 10) : 1;
+        sides = parseInt(diceMatch[2], 10);
+      } else if (numberMatch) {
+        count = 1;
+        sides = parseInt(numberMatch[1], 10);
+      } else {
+        return interaction.reply({
+          content: '❌ ダイスの形式が正しくありません。（例: `1d100`, `2d6`, `1d6`, `100`）',
+          flags: MessageFlags.Ephemeral
+        });
+      }
+
+      if (count < 1 || count > 50 || sides < 1 || sides > 10000) {
+        return interaction.reply({
+          content: '❌ ダイスの個数は1〜50個、面数は1〜10000面の間で指定してください。',
+          flags: MessageFlags.Ephemeral
+        });
+      }
+
+      const results = [];
+      let total = 0;
+      for (let i = 0; i < count; i++) {
+        const val = Math.floor(Math.random() * sides) + 1;
+        results.push(val);
+        total += val;
+      }
+
+      const formulaStr = `${count}d${sides}${comment ? ` （${comment}）` : ''}`;
+      const embed = new EmbedBuilder()
+        .setTitle('🎲 ダイスロール')
+        .setColor(0x3498DB)
+        .setTimestamp();
+
+      if (count === 1) {
+        embed.setDescription(`${interaction.user} がダイスを振りました！\n\n**【 ${formulaStr} 】**\n## 🎯 出目: \` ${total} \` / ${sides}`);
+      } else {
+        const rollsDisplay = results.length <= 20 
+          ? `[ ${results.join(', ')} ]` 
+          : `[ ${results.slice(0, 20).join(', ')}, ... ]`;
+        embed.setDescription(`${interaction.user} がダイスを振りました！\n\n**【 ${formulaStr} 】**\n出目: \`${rollsDisplay}\`\n## 🎯 合計: \` ${total} \``);
+      }
+
+      return interaction.reply({ embeds: [embed] });
+    }
+
     if (interaction.commandName !== 'timer') return;
 
     const sub = interaction.options.getSubcommand();

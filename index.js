@@ -21,6 +21,8 @@ const {
   ButtonStyle,
   EmbedBuilder,
   MessageFlags,
+  ChannelType,
+  PermissionFlagsBits,
 } = require('discord.js');
 
 const {
@@ -650,6 +652,33 @@ const commands = [
     .addSubcommand(sub =>
       sub.setName('cancel').setDescription('投票を結果非公開のまま中止します（作成者のみ）')
     ),
+  new SlashCommandBuilder()
+    .setName('vc')
+    .setDescription('ボイスチャンネルのメンバー操作を行います')
+    .addSubcommand(sub =>
+      sub
+        .setName('gather')
+        .setDescription('密談VCなどに散らばったメンバーを1つのVCに全員集合させます')
+        .addChannelOption(opt =>
+          opt
+            .setName('target')
+            .setDescription('集合先のVC（省略時はあなたが現在いるVC）')
+            .addChannelTypes(ChannelType.GuildVoice)
+            .setRequired(false)
+        )
+        .addBooleanOption(opt =>
+          opt
+            .setName('same_category')
+            .setDescription('同じカテゴリー内のVCのみを対象にするか（デフォルト: True / 安全モード）')
+            .setRequired(false)
+        )
+        .addBooleanOption(opt =>
+          opt
+            .setName('include_bots')
+            .setDescription('Botも一緒に移動させるか（デフォルト: False）')
+            .setRequired(false)
+        )
+    ),
 ];
 
 // clientReady イベント
@@ -978,6 +1007,121 @@ client.on('interactionCreate', async interaction => {
           content: '🗑️ 投票を中止しました。',
           flags: MessageFlags.Ephemeral,
         });
+      }
+    }
+
+    // 📢 ボイスチャンネル操作コマンド (/vc)
+    if (interaction.commandName === 'vc') {
+      const sub = interaction.options.getSubcommand();
+
+      // /vc gather — 密談VCのメンバーを一斉集合
+      if (sub === 'gather') {
+        // 実行者の権限チェック
+        if (!interaction.memberPermissions?.has(PermissionFlagsBits.MoveMembers)) {
+          return interaction.reply({
+            content: '❌ このコマンドを実行するには「メンバーを移動（Move Members）」権限が必要です。',
+            flags: MessageFlags.Ephemeral,
+          });
+        }
+
+        // Botの権限チェック
+        const botMember = interaction.guild.members.me;
+        if (!botMember?.permissions.has(PermissionFlagsBits.MoveMembers)) {
+          return interaction.reply({
+            content: '❌ Botに「メンバーを移動（Move Members）」権限がありません。サーバー設定またはロール設定でBotに権限を付与してください。',
+            flags: MessageFlags.Ephemeral,
+          });
+        }
+
+        // 集合先VCの決定
+        const targetOption = interaction.options.getChannel('target');
+        const targetChannel = targetOption || interaction.member.voice?.channel;
+        if (!targetChannel || targetChannel.type !== ChannelType.GuildVoice) {
+          return interaction.reply({
+            content: '❌ 集合先のVCが見つかりません。集合先VCに入ってから実行するか、`target` オプションでVCを指定してください。',
+            flags: MessageFlags.Ephemeral,
+          });
+        }
+
+        const sameCategory = interaction.options.getBoolean('same_category') ?? true;
+        const includeBots = interaction.options.getBoolean('include_bots') ?? false;
+        const afkChannelId = interaction.guild.afkChannelId;
+
+        // 対象となる他のVCを抽出
+        const sourceChannels = interaction.guild.channels.cache.filter(ch => {
+          if (ch.type !== ChannelType.GuildVoice) return false;
+          if (ch.id === targetChannel.id) return false;
+          if (afkChannelId && ch.id === afkChannelId) return false;
+          if (sameCategory && targetChannel.parentId && ch.parentId !== targetChannel.parentId) return false;
+          return true;
+        });
+
+        // 移動対象メンバーを収集
+        const moveTargets = [];
+        for (const [, ch] of sourceChannels) {
+          for (const [, member] of ch.members) {
+            if (!includeBots && member.user.bot) continue;
+            moveTargets.push({ member, fromChannelName: ch.name });
+          }
+        }
+
+        if (moveTargets.length === 0) {
+          const scopeLabel = sameCategory && targetChannel.parentId
+            ? `同じカテゴリー（${targetChannel.parent?.name || '不明'}）内の他VC`
+            : 'サーバー内の他VC';
+          return interaction.reply({
+            content: `ℹ️ ${scopeLabel}に移動対象のメンバーはいませんでした。`,
+            flags: MessageFlags.Ephemeral,
+          });
+        }
+
+        await interaction.deferReply();
+
+        // 一斉移動を実行
+        const results = await Promise.allSettled(
+          moveTargets.map(async ({ member, fromChannelName }) => {
+            await member.voice.setChannel(targetChannel, `VC全員集合 (/vc gather by ${interaction.user.tag})`);
+            return { name: member.displayName, fromChannelName };
+          })
+        );
+
+        const movedByChannel = new Map();
+        const failed = [];
+
+        results.forEach((res, i) => {
+          if (res.status === 'fulfilled') {
+            const { name, fromChannelName } = res.value;
+            if (!movedByChannel.has(fromChannelName)) movedByChannel.set(fromChannelName, []);
+            movedByChannel.get(fromChannelName).push(name);
+          } else {
+            failed.push(moveTargets[i].member.displayName);
+          }
+        });
+
+        const movedCount = moveTargets.length - failed.length;
+        const breakdownLines = [...movedByChannel.entries()].map(
+          ([chName, names]) => `・🔊 **${chName}** → ${names.join(', ')}`
+        );
+
+        const embed = new EmbedBuilder()
+          .setTitle(`📢 メンバーを「${targetChannel.name}」に集合させました！`)
+          .setColor(0x2ECC71)
+          .setDescription(
+            breakdownLines.length > 0
+              ? breakdownLines.join('\n')
+              : '移動できたメンバーはいませんでした。'
+          )
+          .setFooter({
+            text: `移動完了: ${movedCount}名${failed.length > 0 ? ` / 失敗: ${failed.length}名` : ''}${sameCategory && targetChannel.parentId ? ' ｜ 同カテゴリー内のみ対象' : ' ｜ サーバー全体対象'}`
+          })
+          .setTimestamp();
+
+        if (failed.length > 0) {
+          embed.addFields({ name: '⚠️ 移動できなかったメンバー', value: failed.join(', ') });
+        }
+
+        console.log(`[VC Gather] ${movedCount}名を「${targetChannel.name}」に移動しました。`);
+        return interaction.editReply({ embeds: [embed] });
       }
     }
 

@@ -816,6 +816,28 @@ const commands = [
             .setRequired(false)
         )
     ),
+  new SlashCommandBuilder()
+    .setName('help')
+    .setDescription('Botのコマンド一覧と使い方を表示します')
+    .addStringOption(opt =>
+      opt
+        .setName('category')
+        .setDescription('詳しく見たい機能カテゴリ（省略時は一覧表示）')
+        .setRequired(false)
+        .addChoices(
+          { name: '⏱️ タイマー (/timer)', value: 'timer' },
+          { name: '🎲 ダイス (/dice)', value: 'dice' },
+          { name: '👥 PL管理・シャッフル (/pl)', value: 'pl' },
+          { name: '🗳️ 匿名投票 (/vote)', value: 'vote' },
+          { name: '📢 VC操作 (/vc)', value: 'vc' }
+        )
+    )
+    .addBooleanOption(opt =>
+      opt
+        .setName('public')
+        .setDescription('チャンネル全員に表示するか（デフォルト: False / 自分だけに表示）')
+        .setRequired(false)
+    ),
 ];
 
 // clientReady イベント
@@ -841,6 +863,79 @@ client.once('clientReady', async () => {
 // スラッシュコマンド処理
 client.on('interactionCreate', async interaction => {
   if (interaction.isChatInputCommand()) {
+    // 📖 ヘルプコマンド (/help)
+    if (interaction.commandName === 'help') {
+      const category = interaction.options.getString('category');
+      const isPublic = interaction.options.getBoolean('public') ?? false;
+      const replyOpts = isPublic ? {} : { flags: MessageFlags.Ephemeral };
+
+      const sections = {
+        timer: {
+          name: '⏱️ タイマー (`/timer`)',
+          value: [
+            '`/timer start time:<時間> [title]` — タイマー開始（例: `15`, `15m`, `90s`, `1h30m`）',
+            '`/timer stop` — 実行中のタイマーを停止',
+            '`/timer connect` / `disconnect` — BotのVC参加・退出',
+            '`/timer test [type]` — チャイム音のテスト再生',
+            '💡 残り5分・1分・終了時にVCチャイム＆通知。ボタンで一時停止・+1/+3/+5分延長、終了時に「全員集合」ボタンが表示されます。',
+          ].join('\n'),
+        },
+        dice: {
+          name: '🎲 ダイス (`/dice`)',
+          value: [
+            '`/dice [roll] [comment]` — サイコロを振る（省略時は `1d100`）',
+            '💡 `1d6`, `2d6`, `d20`, `100` などに対応（1〜50個、1〜10,000面）。',
+          ].join('\n'),
+        },
+        pl: {
+          name: '👥 PL管理・シャッフル (`/pl`)',
+          value: [
+            '`/pl from-vc` — VCメンバー（Bot除く）をPLリストに一括登録',
+            '`/pl add name:<名前>` / `remove` / `list` / `clear` — PLリストの編集・確認',
+            '`/pl shuffle` — 発言順をランダムにシャッフル（🥇🥈🥉付き）',
+            '`/pl pick` — ルーレット演出で1人をランダム選出',
+          ].join('\n'),
+        },
+        vote: {
+          name: '🗳️ 匿名投票 (`/vote`)',
+          value: [
+            '`/vote start [title] [options]` — ボタン式の匿名投票を開始（`options` 省略時は `/pl` リストを使用）',
+            '`/vote status` — 現在の集計・投票内訳をGMだけに表示',
+            '`/vote result` — 投票を締め切り、棒グラフ＆最多得票👑付きで公開（作成者のみ）',
+            '`/vote cancel` — 結果非公開のまま中止（作成者のみ）',
+            '💡 メッセージ下のGMボタン（👁️内訳確認 / 📊結果公開 / 🗑️中止）からも操作できます。',
+          ].join('\n'),
+        },
+        vc: {
+          name: '📢 VC操作 (`/vc`)',
+          value: [
+            '`/vc gather [target] [same_category]` — 密談VCなどに散らばったメンバーを一斉集合（デフォルト: 同カテゴリー内のみ）',
+            '`/vc mute [target] [include_self]` — VCメンバーを一斉サーバーミュート（デフォルト: 実行者とBotを除く）',
+            '`/vc unmute [target]` — VCメンバーのサーバーミュートを一斉解除',
+            '💡 `Move Members` / `Mute Members` 権限が必要です。',
+          ].join('\n'),
+        },
+      };
+
+      const embed = new EmbedBuilder()
+        .setTitle('📖 マダミスユーティリティBot コマンドヘルプ')
+        .setColor(0x5865F2)
+        .setTimestamp();
+
+      if (category && sections[category]) {
+        embed
+          .setDescription(`**${sections[category].name}** の詳しい使い方です。`)
+          .addFields(sections[category]);
+      } else {
+        embed
+          .setDescription('マダミス進行に使えるコマンド一覧です。`category` オプションで機能ごとに絞り込むこともできます。')
+          .addFields(Object.values(sections))
+          .setFooter({ text: '全員に共有したい場合は /help public:True を指定してください' });
+      }
+
+      return interaction.reply({ embeds: [embed], ...replyOpts });
+    }
+
     // 🎲 ダイスコマンド (/dice)
     if (interaction.commandName === 'dice') {
       const rollInput = (interaction.options.getString('roll') || '1d100').trim().toLowerCase();

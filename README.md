@@ -230,3 +230,12 @@ npm start
 - `include_bots`: デフォルト `False`。Botは対象外（チャイム再生が止まらないように保護）。
 
 > **必要な権限:** `/vc gather` には `Move Members`（メンバーを移動）、`/vc mute` / `/vc unmute` には `Mute Members`（メンバーをミュート）権限が実行者およびBotの両方に必要です。
+
+---
+
+### `/help` — コマンドヘルプ
+
+| オプション | 必須 | 説明 |
+|---|---|---|
+| `category` | 任意 | 詳しく見たい機能カテゴリ（`timer` / `dice` / `pl` / `vote` / `vc`）。省略時は全コマンド一覧を表示 |
+| `public` | 任意 | `True` にするとチャンネル全員に表示（デフォルトは `False`＝自分だけに表示） |

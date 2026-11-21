@@ -63,6 +63,35 @@ function shuffleArray(arr) {
   return a;
 }
 
+/**
+ * ダイスを振って結果Embedを生成する共通関数
+ */
+function rollDiceAndBuildEmbed({ user, count, sides, comment }) {
+  const results = [];
+  let total = 0;
+  for (let i = 0; i < count; i++) {
+    const val = Math.floor(Math.random() * sides) + 1;
+    results.push(val);
+    total += val;
+  }
+
+  const formulaStr = `${count}d${sides}${comment ? ` （${comment}）` : ''}`;
+  const embed = new EmbedBuilder()
+    .setTitle('🎲 ダイスロール')
+    .setColor(0x3498DB)
+    .setTimestamp();
+
+  if (count === 1) {
+    embed.setDescription(`${user} がダイスを振りました！\n\n**【 ${formulaStr} 】**\n## 🎯 出目: \` ${total} \` / ${sides}`);
+  } else {
+    const rollsDisplay = results.length <= 20
+      ? `[ ${results.join(', ')} ]`
+      : `[ ${results.slice(0, 20).join(', ')}, ... ]`;
+    embed.setDescription(`${user} がダイスを振りました！\n\n**【 ${formulaStr} 】**\n出目: \`${rollsDisplay}\`\n## 🎯 合計: \` ${total} \``);
+  }
+  return embed;
+}
+
 // サーバーごとの投票セッション管理: Map<guildId, VoteSession>
 const voteSessions = new Map();
 
@@ -689,6 +718,12 @@ const commands = [
         .setName('comment')
         .setDescription('ダイスを振る理由・項目名（例: 調査、発言順決め）')
         .setRequired(false)
+    )
+    .addBooleanOption(opt =>
+      opt
+        .setName('panel')
+        .setDescription('自分は振らず、みんな用のダイスボタンパネルだけを表示します（デフォルト: False）')
+        .setRequired(false)
     ),
   new SlashCommandBuilder()
     .setName('pl')
@@ -883,8 +918,8 @@ client.on('interactionCreate', async interaction => {
         dice: {
           name: '🎲 ダイス (`/dice`)',
           value: [
-            '`/dice [roll] [comment]` — サイコロを振る（省略時は `1d100`）',
-            '💡 `1d6`, `2d6`, `d20`, `100` などに対応（1〜50個、1〜10,000面）。',
+            '`/dice [roll] [comment] [panel]` — サイコロを振る（省略時は `1d100`）',
+            '💡 結果の下にみんなも押せるダイスボタンが表示されます。`panel:True` でみんな用のダイスボタンパネルだけを出すこともできます。',
           ].join('\n'),
         },
         pl: {
@@ -938,8 +973,38 @@ client.on('interactionCreate', async interaction => {
 
     // 🎲 ダイスコマンド (/dice)
     if (interaction.commandName === 'dice') {
-      const rollInput = (interaction.options.getString('roll') || '1d100').trim().toLowerCase();
-      const comment = interaction.options.getString('comment');
+      const rawRoll = interaction.options.getString('roll');
+      const comment = interaction.options.getString('comment')?.trim() || null;
+      const isPanel = interaction.options.getBoolean('panel') ?? false;
+
+      // みんな用ダイスボタンパネルのみ表示するモード (/dice panel:True)
+      if (isPanel && !rawRoll) {
+        const safeComment = comment ? comment.slice(0, 60) : '';
+        const suffix = safeComment ? `_${safeComment}` : '';
+        const presets = [
+          { label: '1d100', id: `dice_roll_1d100${suffix}` },
+          { label: '1d6', id: `dice_roll_1d6${suffix}` },
+          { label: '2d6', id: `dice_roll_2d6${suffix}` },
+          { label: '1d20', id: `dice_roll_1d20${suffix}` },
+        ];
+        const row = new ActionRowBuilder().addComponents(
+          presets.map(p =>
+            new ButtonBuilder()
+              .setCustomId(p.id)
+              .setLabel(p.label)
+              .setEmoji('🎲')
+              .setStyle(ButtonStyle.Primary)
+          )
+        );
+        const embed = new EmbedBuilder()
+          .setTitle(`🎲 みんな用ダイス${comment ? `（${comment}）` : ''}`)
+          .setDescription('下のボタンを押すと、誰でもすぐにダイスを振れます！')
+          .setColor(0x3498DB)
+          .setTimestamp();
+        return interaction.reply({ embeds: [embed], components: [row] });
+      }
+
+      const rollInput = (rawRoll || '1d100').trim().toLowerCase();
 
       let count = 1;
       let sides = 100;
@@ -969,30 +1034,28 @@ client.on('interactionCreate', async interaction => {
         });
       }
 
-      const results = [];
-      let total = 0;
-      for (let i = 0; i < count; i++) {
-        const val = Math.floor(Math.random() * sides) + 1;
-        results.push(val);
-        total += val;
+      const safeComment = comment ? comment.slice(0, 60) : '';
+      const buttonCustomId = `dice_roll_${count}d${sides}${safeComment ? `_${safeComment}` : ''}`;
+      const diceButtonRow = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(buttonCustomId)
+          .setLabel(`${count}d${sides} を振る`)
+          .setEmoji('🎲')
+          .setStyle(ButtonStyle.Primary)
+      );
+
+      // 指定形式のボタンパネルのみ表示 (/dice roll:2d6 panel:True)
+      if (isPanel) {
+        const embed = new EmbedBuilder()
+          .setTitle(`🎲 みんな用ダイス（${count}d${sides}${comment ? ` / ${comment}` : ''}）`)
+          .setDescription(`下のボタンを押すと、誰でも **${count}d${sides}** を振れます！`)
+          .setColor(0x3498DB)
+          .setTimestamp();
+        return interaction.reply({ embeds: [embed], components: [diceButtonRow] });
       }
 
-      const formulaStr = `${count}d${sides}${comment ? ` （${comment}）` : ''}`;
-      const embed = new EmbedBuilder()
-        .setTitle('🎲 ダイスロール')
-        .setColor(0x3498DB)
-        .setTimestamp();
-
-      if (count === 1) {
-        embed.setDescription(`${interaction.user} がダイスを振りました！\n\n**【 ${formulaStr} 】**\n## 🎯 出目: \` ${total} \` / ${sides}`);
-      } else {
-        const rollsDisplay = results.length <= 20 
-          ? `[ ${results.join(', ')} ]` 
-          : `[ ${results.slice(0, 20).join(', ')}, ... ]`;
-        embed.setDescription(`${interaction.user} がダイスを振りました！\n\n**【 ${formulaStr} 】**\n出目: \`${rollsDisplay}\`\n## 🎯 合計: \` ${total} \``);
-      }
-
-      return interaction.reply({ embeds: [embed] });
+      const embed = rollDiceAndBuildEmbed({ user: interaction.user, count, sides, comment });
+      return interaction.reply({ embeds: [embed], components: [diceButtonRow] });
     }
 
     // 🎭 PLコマンド (/pl)
@@ -1564,6 +1627,23 @@ client.on('interactionCreate', async interaction => {
   // ボタン操作処理
   if (interaction.isButton()) {
     const guildId = interaction.guildId;
+
+    // 🎲 みんな用ダイスボタン処理
+    if (interaction.customId.startsWith('dice_roll_')) {
+      const match = interaction.customId.match(/^dice_roll_(\d+)d(\d+)(?:_(.*))?$/);
+      if (!match) {
+        return interaction.reply({
+          content: '❌ ダイスボタンの情報が不正です。',
+          flags: MessageFlags.Ephemeral,
+        });
+      }
+      const count = parseInt(match[1], 10);
+      const sides = parseInt(match[2], 10);
+      const comment = match[3] || null;
+
+      const embed = rollDiceAndBuildEmbed({ user: interaction.user, count, sides, comment });
+      return interaction.reply({ embeds: [embed] });
+    }
 
     // 📢 タイマー終了メッセージの「全員集合」ボタン処理
     if (interaction.customId.startsWith('vc_gather_')) {

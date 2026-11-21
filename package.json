@@ -8,13 +8,14 @@
     "generate-sounds": "node generate-sounds.js"
   },
   "dependencies": {
-    "@discordjs/voice": "^0.18.0",
-    "@noble/ciphers": "^2.4.0",
+    "@discordjs/voice": "^0.19.2",
+    "@snazzah/davey": "^0.2.0",
+    "@stablelib/xchacha20poly1305": "^2.0.1",
     "discord.js": "^14.18.0",
     "dotenv": "^16.4.7",
     "ffmpeg-static": "^5.2.0",
-    "libsodium-wrappers": "^0.8.4",
-    "opusscript": "^0.1.1"
+    "opusscript": "^0.1.1",
+    "tweetnacl": "^1.0.3"
   },
   "optionalDependencies": {
     "@discordjs/opus": "^0.9.0"

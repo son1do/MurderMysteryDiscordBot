@@ -1,4 +1,4 @@
-# ⏱️ マダミス用 Discord タイマー Bot (Madamisu Timer Bot)
+# ⏱️ マダミス用 Discord タイマー Bot (MurderMystery Timer Bot)
 
 マーダーミステリー（マダミス）の議論フェーズや密談フェーズの進行をサポートする Discord Bot です。
 テキストチャンネルへの通知に加え、**ボイスチャンネル（VC）でのチャイム再生（残り5分・残り1分・終了時）** に対応しています。
@@ -28,7 +28,7 @@
 ## 📁 フォルダ構成
 
 ```text
-madamisu-timer-bot/
+MurderMysteryDiscordBot/
 ├── index.js              # Bot本体プログラム
 ├── generate-sounds.js    # 効果音WAV生成スクリプト
 ├── package.json          # プロジェクト設定・依存関係
@@ -46,7 +46,7 @@ madamisu-timer-bot/
 ### 1. Discord Developer Portal での準備
 
 1. [Discord Developer Portal](https://discord.com/developers/applications) にアクセスしてログインします。
-2. 右上の **「New Application」** をクリックし、名前（例: `MadamisuTimer`）を入力して作成します。
+2. 右上の **「New Application」** をクリックし、名前（例: `MurderMysteryTimer`）を入力して作成します。
 3. 左メニューの **「Bot」** を選択:
    - **「Reset Token」** をクリックして **Bot Token** をコピーします（後で使います）。
 4. 左メニューの **「OAuth2」** -> **「URL Generator」** を選択:

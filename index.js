@@ -23,6 +23,7 @@ const {
   MessageFlags,
   ChannelType,
   PermissionFlagsBits,
+  ActivityType,
 } = require('discord.js');
 
 const {
@@ -1313,6 +1314,11 @@ const commands = [
 // clientReady イベント
 client.once('clientReady', async () => {
   console.log(`Ready! Logged in as ${client.user.tag}`);
+
+  client.user.setPresence({
+    activities: [{ name: 'MurderMystery', type: ActivityType.Playing }],
+    status: 'online',
+  });
 
   const guildId = process.env.GUILD_ID;
   if (guildId) {

@@ -16,7 +16,157 @@ const {
 } = require('@discordjs/voice');
 const { activeTimers } = require('../lib/state');
 const { parseDuration, formatTime, createProgressBar } = require('../lib/utils');
-const { SOUNDS_DIR, connectToVoice, cancelEmptyVcTimer } = require('../lib/voice');
+const { SOUNDS_DIR, connectToVoice, cancelEmptyVcTimer, playChimeIfConnected } = require('../lib/voice');
+
+// サブタイマー管理: Map<messageId, SubTimerSession>（メインタイマーと同時並行で複数動作可能）
+const activeSubTimers = new Map();
+const MAX_SUB_TIMERS_PER_GUILD = 5;
+
+function buildSubTimerEmbed(session) {
+  const progressBar = createProgressBar(session.remainingSeconds, session.totalSeconds, 10);
+  const statusText = session.isPaused ? '⏸️ 一時停止中' : '🔵 進行中';
+  const color = session.isPaused
+    ? 0xE67E22
+    : (session.remainingSeconds <= 30 ? 0xE74C3C : 0x3498DB);
+
+  return new EmbedBuilder()
+    .setTitle(`⏲️ 【サブ】${session.title}`)
+    .setColor(color)
+    .addFields(
+      { name: '⏳ 残り時間', value: `### \` ${formatTime(session.remainingSeconds)} \``, inline: true },
+      { name: '📊 状態', value: statusText, inline: true },
+      { name: '進行バー', value: progressBar, inline: false }
+    )
+    .setFooter({ text: 'メインタイマーとは独立して動作しています' })
+    .setTimestamp();
+}
+
+function buildSubTimerButtonRow(isPaused) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId('subtimer_toggle_pause')
+      .setLabel(isPaused ? '再開' : '一時停止')
+      .setEmoji(isPaused ? '▶️' : '⏸️')
+      .setStyle(isPaused ? ButtonStyle.Success : ButtonStyle.Primary),
+    new ButtonBuilder()
+      .setCustomId('subtimer_add_1m')
+      .setLabel('+1分')
+      .setEmoji('➕')
+      .setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId('subtimer_add_3m')
+      .setLabel('+3分')
+      .setEmoji('➕')
+      .setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId('subtimer_stop')
+      .setLabel('終了')
+      .setEmoji('⏹️')
+      .setStyle(ButtonStyle.Danger)
+  );
+}
+
+class SubTimerSession {
+  constructor({ guildId, textChannel, totalSeconds, title }) {
+    this.guildId = guildId;
+    this.textChannel = textChannel;
+    this.totalSeconds = totalSeconds;
+    this.remainingSeconds = totalSeconds;
+    this.title = title || 'サブタイマー';
+    this.isPaused = false;
+    this.message = null;
+    this.timerInterval = null;
+    this.lastEditTime = 0;
+    this.notified1m = totalSeconds <= 90;
+  }
+
+  async start(interaction) {
+    const replyResponse = await interaction.reply({
+      embeds: [buildSubTimerEmbed(this)],
+      components: [buildSubTimerButtonRow(this.isPaused)],
+      withResponse: true,
+    });
+    this.message = replyResponse.resource.message;
+    activeSubTimers.set(this.message.id, this);
+    this.timerInterval = setInterval(() => this.tick(), 1000);
+  }
+
+  async tick() {
+    if (this.isPaused) return;
+    this.remainingSeconds -= 1;
+
+    if (!this.notified1m && this.remainingSeconds <= 60 && this.remainingSeconds > 50) {
+      this.notified1m = true;
+      this.textChannel.send({
+        content: `🔔 **【サブタイマー残り1分】** 「**${this.title}**」はまもなく終了です！`,
+      }).catch(console.error);
+      playChimeIfConnected(this.guildId, 'notice.wav');
+    }
+
+    if (this.remainingSeconds <= 0) {
+      await this.finish(false);
+      return;
+    }
+
+    const now = Date.now();
+    if (now - this.lastEditTime >= 5000) {
+      this.lastEditTime = now;
+      this.updateMessage().catch(console.error);
+    }
+  }
+
+  async togglePause() {
+    this.isPaused = !this.isPaused;
+    await this.updateMessage();
+    return this.isPaused;
+  }
+
+  async addSeconds(seconds) {
+    this.remainingSeconds += seconds;
+    if (this.remainingSeconds > this.totalSeconds) {
+      this.totalSeconds = this.remainingSeconds;
+    }
+    if (this.remainingSeconds > 60) this.notified1m = false;
+    await this.updateMessage();
+  }
+
+  async updateMessage() {
+    if (!this.message) return;
+    try {
+      await this.message.edit({
+        embeds: [buildSubTimerEmbed(this)],
+        components: [buildSubTimerButtonRow(this.isPaused)],
+      });
+    } catch (e) {
+      console.error('[SubTimer] メッセージ更新エラー:', e.message);
+    }
+  }
+
+  async finish(manual = false) {
+    if (this.timerInterval) {
+      clearInterval(this.timerInterval);
+      this.timerInterval = null;
+    }
+    if (this.message) activeSubTimers.delete(this.message.id);
+
+    const doneEmbed = new EmbedBuilder()
+      .setTitle(`⏲️ 【サブ】${this.title} - ${manual ? '中断' : '終了'}`)
+      .setColor(manual ? 0x95A5A6 : 0xE74C3C)
+      .setDescription(manual ? '⏹️ サブタイマーが手動で終了されました。' : '🔔 **サブタイマーの時間が終了しました！**')
+      .setTimestamp();
+
+    if (this.message) {
+      await this.message.edit({ embeds: [doneEmbed], components: [] }).catch(console.error);
+    }
+
+    if (!manual) {
+      this.textChannel.send({
+        content: `⏲️ **【サブタイマー終了】** 「**${this.title}**」の時間が終了しました！`,
+      }).catch(console.error);
+      playChimeIfConnected(this.guildId, 'finish.wav');
+    }
+  }
+}
 
 function buildTimerEmbed(session) {
   const percent = session.totalSeconds > 0
@@ -267,6 +417,23 @@ module.exports = {
         )
     )
     .addSubcommand(sub =>
+      sub
+        .setName('sub')
+        .setDescription('メインタイマーと同時並行で動く小さなサブタイマーを開始します（例: 密談3分）')
+        .addStringOption(opt =>
+          opt
+            .setName('time')
+            .setDescription('時間（例: 3, 3m, 90s）。数字だけの場合は「分」')
+            .setRequired(true)
+        )
+        .addStringOption(opt =>
+          opt
+            .setName('title')
+            .setDescription('サブタイマーのタイトル（例: 密談タイム、休憩、個人調査）')
+            .setRequired(false)
+        )
+    )
+    .addSubcommand(sub =>
       sub.setName('stop').setDescription('実行中のタイマーを停止します')
     )
     .addSubcommand(sub =>
@@ -284,7 +451,7 @@ module.exports = {
             )
         )
     ),
-  buttonPrefixes: ['timer_'],
+  buttonPrefixes: ['timer_', 'subtimer_'],
 
   async execute(interaction) {
     const sub = interaction.options.getSubcommand();
@@ -416,6 +583,40 @@ module.exports = {
       return;
     }
 
+    if (sub === 'sub') {
+      const timeInput = interaction.options.getString('time');
+      const title = (interaction.options.getString('title') || 'サブタイマー').trim();
+      const seconds = parseDuration(timeInput);
+
+      if (!seconds || seconds <= 0) {
+        return interaction.reply({
+          content: '❌ 時間の指定形式が正しくありません。（例: `3` = 3分, `3m` = 3分, `90s` = 90秒）',
+          flags: MessageFlags.Ephemeral,
+        });
+      }
+
+      let guildSubCount = 0;
+      for (const s of activeSubTimers.values()) {
+        if (s.guildId === guildId) guildSubCount++;
+      }
+      if (guildSubCount >= MAX_SUB_TIMERS_PER_GUILD) {
+        return interaction.reply({
+          content: `⚠️ 同時に動かせるサブタイマーは最大 ${MAX_SUB_TIMERS_PER_GUILD} 個までです。`,
+          flags: MessageFlags.Ephemeral,
+        });
+      }
+
+      const subSession = new SubTimerSession({
+        guildId,
+        textChannel: interaction.channel,
+        totalSeconds: seconds,
+        title,
+      });
+      await subSession.start(interaction);
+      console.log(`[SubTimer] サブタイマー「${title}」（${seconds}秒）を開始しました。`);
+      return;
+    }
+
     if (sub === 'stop') {
       const session = activeTimers.get(guildId);
       if (!session) {
@@ -433,6 +634,49 @@ module.exports = {
   },
 
   async handleButton(interaction) {
+    // サブタイマーボタン処理
+    if (interaction.customId.startsWith('subtimer_')) {
+      const subSession = activeSubTimers.get(interaction.message.id);
+      if (!subSession) {
+        return interaction.reply({
+          content: 'このサブタイマーは既に終了しています。',
+          flags: MessageFlags.Ephemeral,
+        });
+      }
+
+      switch (interaction.customId) {
+        case 'subtimer_toggle_pause': {
+          const isPaused = await subSession.togglePause();
+          return interaction.reply({
+            content: isPaused ? '⏸️ サブタイマーを一時停止しました。' : '▶️ サブタイマーを再開しました。',
+            flags: MessageFlags.Ephemeral,
+          });
+        }
+        case 'subtimer_add_1m': {
+          await subSession.addSeconds(60);
+          return interaction.reply({
+            content: '➕ サブタイマーを 1分 延長しました。',
+            flags: MessageFlags.Ephemeral,
+          });
+        }
+        case 'subtimer_add_3m': {
+          await subSession.addSeconds(180);
+          return interaction.reply({
+            content: '➕ サブタイマーを 3分 延長しました。',
+            flags: MessageFlags.Ephemeral,
+          });
+        }
+        case 'subtimer_stop': {
+          await subSession.finish(true);
+          return interaction.reply({
+            content: '⏹️ サブタイマーを終了しました。',
+            flags: MessageFlags.Ephemeral,
+          });
+        }
+      }
+      return;
+    }
+
     const session = activeTimers.get(interaction.guildId);
     if (!session) {
       return interaction.reply({

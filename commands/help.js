@@ -79,9 +79,10 @@ const COMMAND_DETAILS = {
     color: 0x2ECC71,
     summary: '残り5分・1分・終了時にVCチャイムとテキスト通知。ボタンで一時停止・`+1分/+3分/+5分`延長、終了時に「全員集合」ボタンが表示されます。',
     usage: [
-      '`/timer start time:<時間> [title]` — タイマー開始（`15`, `15m`, `90s`, `1h30m`）',
-      '`/timer stop` — 実行中のタイマーを停止',
-      '`/timer connect` / `disconnect` — BotのVC参加・退出（終了後も常駐）',
+      '`/timer start time:<時間> [title]` — メインタイマー開始（`15`, `15m`, `90s`, `1h30m`）',
+      '`/timer sub time:<時間> [title]` — メインと同時並行で動く小さなサブタイマー開始（最大5個）',
+      '`/timer stop` — 実行中のメインタイマーを停止',
+      '`/timer connect` / `disconnect` — BotのVC参加・退出（終了後も常駐、無人5分で自動切断）',
       '`/timer test [type]` — チャイム音のテスト再生',
     ],
     example: '`/timer start time:15m title:全体議論①`',
